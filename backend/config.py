@@ -17,12 +17,17 @@ class Config:
     HADOOP_STREAMING_JAR = os.environ.get("HADOOP_STREAMING_JAR", "")
 
     # Storage paths (Use /tmp on Vercel/serverless environments where root filesystem is read-only)
-    IS_SERVERLESS = os.environ.get("VERCEL") == "1" or os.environ.get("AWS_LAMBDA_FUNCTION_NAME") is not None
+    IS_SERVERLESS = (
+        os.environ.get("VERCEL") is not None
+        or os.environ.get("VERCEL_ENV") is not None
+        or os.environ.get("AWS_LAMBDA_FUNCTION_NAME") is not None
+        or not os.access(str(BASE_DIR), os.W_OK)
+    )
 
+    TEMP_DIR = tempfile.gettempdir()
     if IS_SERVERLESS:
-        TEMP_DIR = tempfile.gettempdir()
-        UPLOAD_FOLDER = os.path.join(TEMP_DIR, "uploads")
-        RESULTS_FOLDER = os.path.join(TEMP_DIR, "results")
+        UPLOAD_FOLDER = os.path.join(TEMP_DIR, "hadoop_uploads")
+        RESULTS_FOLDER = os.path.join(TEMP_DIR, "hadoop_results")
         STATE_FILE = os.path.join(TEMP_DIR, "hadoop_analytics_state.json")
     else:
         UPLOAD_FOLDER = os.environ.get("UPLOAD_FOLDER", os.path.join(BASE_DIR, "uploads"))

@@ -132,7 +132,7 @@ def _build_record(ip, raw_ts, iso_str, dt, day_str, hour_str, method, url, http_
         "ip": ip,
         "timestamp_raw": raw_ts,
         "timestamp_iso": iso_str,
-        "datetime": dt,
+        "datetime": iso_str,
         "day": day_str,
         "hour": hour_str,
         "method": method,

@@ -52,37 +52,11 @@ export function FileUpload({
     }
   };
 
-  const handleFileSelected = async (file) => {
-    setErrorMsg(null);
-    const ext = file.name.split('.').pop().toLowerCase();
-    if (ext !== 'log' && ext !== 'txt' && ext !== 'csv') {
-      setErrorMsg('Unsupported file type. Please upload a .log, .txt, or .csv file.');
-      return;
-    }
-
-    setSelectedFile(file);
-    setIsProcessing(true);
-    setProcessingStage('Uploading file to server...');
-
-    try {
-      const data = await api.uploadFile(file);
-      setUploadInfo(data);
-      setProcessingStage('');
-    } catch (err) {
-      setErrorMsg(err.message || 'Upload failed.');
-      setSelectedFile(null);
-    } finally {
-      setIsProcessing(false);
-    }
-  };
-
-  const triggerAnalysis = async () => {
-    if (!uploadInfo) return;
+  const executeAnalysis = async (mode = selectedMode) => {
     setIsProcessing(true);
     setErrorMsg(null);
 
-    // Simulate animated step transitions for real visual feedback
-    const stages = selectedMode === 'hadoop'
+    const stages = mode === 'hadoop'
       ? [
           'Preparing HDFS directory structure...',
           'Transferring log file to HDFS...',
@@ -106,10 +80,10 @@ export function FileUpload({
       if (stageIdx < stages.length) {
         setProcessingStage(stages[stageIdx]);
       }
-    }, 450);
+    }, 400);
 
     try {
-      const res = await api.analyze(selectedMode);
+      const res = await api.analyze(mode);
       clearInterval(stageInterval);
       setProcessingStage('Completed!');
       setTimeout(() => {
@@ -123,6 +97,36 @@ export function FileUpload({
       setProcessingStage('');
       setErrorMsg(err.message || 'Analysis pipeline encountered an error.');
     }
+  };
+
+  const handleFileSelected = async (file) => {
+    setErrorMsg(null);
+    const ext = file.name.split('.').pop().toLowerCase();
+    if (ext !== 'log' && ext !== 'txt' && ext !== 'csv') {
+      setErrorMsg('Unsupported file type. Please upload a .log, .txt, or .csv file.');
+      return;
+    }
+
+    setSelectedFile(file);
+    setIsProcessing(true);
+    setProcessingStage('Uploading file to server...');
+
+    try {
+      const data = await api.uploadFile(file);
+      setUploadInfo(data);
+      // Automatically execute analysis right after upload
+      await executeAnalysis(selectedMode);
+    } catch (err) {
+      setErrorMsg(err.message || 'Upload failed.');
+      setSelectedFile(null);
+      setIsProcessing(false);
+      setProcessingStage('');
+    }
+  };
+
+  const triggerAnalysis = async () => {
+    if (!uploadInfo) return;
+    await executeAnalysis(selectedMode);
   };
 
   const resetUpload = () => {

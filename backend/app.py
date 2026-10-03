@@ -18,7 +18,7 @@ logger = logging.getLogger("hadoop_analytics")
 
 app = Flask(__name__)
 app.config.from_object(Config)
-CORS(app, resources={r"/api/*": {"origins": "*"}})
+CORS(app, resources={r"/*": {"origins": "*"}}, supports_credentials=True)
 
 # Global state for active dataset & cache
 STATE = {
@@ -62,6 +62,7 @@ def allowed_file(filename: str) -> bool:
     return ext in Config.ALLOWED_EXTENSIONS
 
 @app.route("/api/health", methods=["GET"])
+@app.route("/health", methods=["GET"])
 def health_check():
     hadoop_avail, hadoop_msg = HadoopMapReduceEngine.check_availability()
     return jsonify({
@@ -75,6 +76,7 @@ def health_check():
     })
 
 @app.route("/api/config", methods=["GET", "POST"])
+@app.route("/config", methods=["GET", "POST"])
 def manage_config():
     hadoop_avail, hadoop_msg = HadoopMapReduceEngine.check_availability()
 
@@ -89,6 +91,7 @@ def manage_config():
                     "details": hadoop_msg
                 }), 400
             STATE["processing_mode"] = new_mode
+            save_state()
             logger.info(f"Processing mode updated to: {new_mode}")
             return jsonify({
                 "success": True,
@@ -109,57 +112,67 @@ def manage_config():
     })
 
 @app.route("/api/upload", methods=["POST"])
+@app.route("/upload", methods=["POST"])
 def upload_file():
-    if "file" not in request.files:
-        return jsonify({"success": False, "error": "No file part in request"}), 400
+    try:
+        if "file" not in request.files:
+            return jsonify({"success": False, "error": "No file part in request"}), 400
 
-    file = request.files["file"]
-    if file.filename == "":
-        return jsonify({"success": False, "error": "No selected file"}), 400
+        file = request.files["file"]
+        if file.filename == "":
+            return jsonify({"success": False, "error": "No selected file"}), 400
 
-    if not allowed_file(file.filename):
+        if not allowed_file(file.filename):
+            return jsonify({
+                "success": False,
+                "error": "Unsupported file format. Please upload a .log, .txt, or .csv file."
+            }), 400
+
+        os.makedirs(Config.UPLOAD_FOLDER, exist_ok=True)
+        safe_name = secure_filename(file.filename) or f"upload_{int(time.time())}.log"
+        timestamp_prefix = int(time.time())
+        saved_filename = f"{timestamp_prefix}_{safe_name}"
+        saved_path = os.path.join(Config.UPLOAD_FOLDER, saved_filename)
+
+        file.save(saved_path)
+        file_size = os.path.getsize(saved_path)
+
+        # Count lines
+        line_count = 0
+        with open(saved_path, "r", encoding="utf-8", errors="replace") as f:
+            for _ in f:
+                line_count += 1
+
+        if line_count == 0:
+            try:
+                os.remove(saved_path)
+            except Exception:
+                pass
+            return jsonify({"success": False, "error": "Uploaded file is empty."}), 400
+
+        STATE["active_filename"] = safe_name
+        STATE["active_filepath"] = saved_path
+        STATE["file_size_bytes"] = file_size
+        STATE["total_lines"] = line_count
+        # Invalidate previous analysis
+        STATE["analytics_result"] = None
+        save_state()
+
         return jsonify({
-            "success": False,
-            "error": "Unsupported file format. Please upload a .log or .txt file."
-        }), 400
-
-    safe_name = secure_filename(file.filename)
-    timestamp_prefix = int(time.time())
-    saved_filename = f"{timestamp_prefix}_{safe_name}"
-    saved_path = os.path.join(Config.UPLOAD_FOLDER, saved_filename)
-
-    file.save(saved_path)
-    file_size = os.path.getsize(saved_path)
-
-    # Count lines
-    line_count = 0
-    with open(saved_path, "r", encoding="utf-8", errors="replace") as f:
-        for _ in f:
-            line_count += 1
-
-    if line_count == 0:
-        os.remove(saved_path)
-        return jsonify({"success": False, "error": "Uploaded file is empty."}), 400
-
-    STATE["active_filename"] = safe_name
-    STATE["active_filepath"] = saved_path
-    STATE["file_size_bytes"] = file_size
-    STATE["total_lines"] = line_count
-    # Invalidate previous analysis
-    STATE["analytics_result"] = None
-    save_state()
-
-    return jsonify({
-        "success": True,
-        "filename": safe_name,
-        "file_id": saved_filename,
-        "size_bytes": file_size,
-        "formatted_size": f"{round(file_size / (1024*1024), 2)} MB" if file_size > 1024*1024 else f"{round(file_size/1024, 2)} KB",
-        "total_records": line_count,
-        "message": f"Successfully uploaded {safe_name} ({line_count:,} records)."
-    })
+            "success": True,
+            "filename": safe_name,
+            "file_id": saved_filename,
+            "size_bytes": file_size,
+            "formatted_size": f"{round(file_size / (1024*1024), 2)} MB" if file_size > 1024*1024 else f"{round(file_size/1024, 2)} KB",
+            "total_records": line_count,
+            "message": f"Successfully uploaded {safe_name} ({line_count:,} records)."
+        })
+    except Exception as e:
+        logger.error(f"Error in upload_file: {e}", exc_info=True)
+        return jsonify({"success": False, "error": f"Upload failed: {str(e)}"}), 500
 
 @app.route("/api/load-sample", methods=["POST"])
+@app.route("/load-sample", methods=["POST"])
 def load_sample_dataset():
     sample_path = Config.SAMPLE_LOG_PATH
     if not os.path.exists(sample_path):
@@ -181,12 +194,13 @@ def load_sample_dataset():
     return run_analysis_pipeline(sample_path, mode)
 
 @app.route("/api/analyze", methods=["POST"])
+@app.route("/analyze", methods=["POST"])
 def analyze_log():
     filepath = STATE["active_filepath"]
     if not filepath or not os.path.exists(filepath):
         return jsonify({
             "success": False,
-            "error": "No log file has been uploaded yet. Please upload a .log file first."
+            "error": "No log file has been uploaded yet. Please upload a .log, .txt, or .csv file first."
         }), 400
 
     data = request.get_json(silent=True) or {}
@@ -240,12 +254,14 @@ def run_analysis_pipeline(filepath: str, requested_mode: str):
         }), 500
 
 @app.route("/api/summary", methods=["GET"])
+@app.route("/summary", methods=["GET"])
 def get_summary():
     if not STATE["analytics_result"]:
         return jsonify({"error": "No active dataset analyzed."}), 404
     return jsonify(STATE["analytics_result"]["summary"])
 
 @app.route("/api/status-codes", methods=["GET"])
+@app.route("/status-codes", methods=["GET"])
 def get_status_codes():
     if not STATE["analytics_result"]:
         return jsonify({"error": "No active dataset analyzed."}), 404
@@ -255,6 +271,7 @@ def get_status_codes():
     })
 
 @app.route("/api/urls", methods=["GET"])
+@app.route("/urls", methods=["GET"])
 def get_urls():
     if not STATE["analytics_result"]:
         return jsonify({"error": "No active dataset analyzed."}), 404
@@ -266,6 +283,7 @@ def get_urls():
     })
 
 @app.route("/api/ips", methods=["GET"])
+@app.route("/ips", methods=["GET"])
 def get_ips():
     if not STATE["analytics_result"]:
         return jsonify({"error": "No active dataset analyzed."}), 404
@@ -277,6 +295,7 @@ def get_ips():
     })
 
 @app.route("/api/methods", methods=["GET"])
+@app.route("/methods", methods=["GET"])
 def get_methods():
     if not STATE["analytics_result"]:
         return jsonify({"error": "No active dataset analyzed."}), 404
@@ -285,6 +304,7 @@ def get_methods():
     })
 
 @app.route("/api/traffic", methods=["GET"])
+@app.route("/traffic", methods=["GET"])
 def get_traffic():
     if not STATE["analytics_result"]:
         return jsonify({"error": "No active dataset analyzed."}), 404
@@ -297,12 +317,14 @@ def get_traffic():
     })
 
 @app.route("/api/errors", methods=["GET"])
+@app.route("/errors", methods=["GET"])
 def get_errors():
     if not STATE["analytics_result"]:
         return jsonify({"error": "No active dataset analyzed."}), 404
     return jsonify(STATE["analytics_result"]["errors"])
 
 @app.route("/api/pipeline", methods=["GET"])
+@app.route("/pipeline", methods=["GET"])
 def get_pipeline():
     if not STATE["analytics_result"]:
         return jsonify({"error": "No active dataset analyzed."}), 404
@@ -314,6 +336,7 @@ def get_pipeline():
     })
 
 @app.route("/api/logs", methods=["GET"])
+@app.route("/logs", methods=["GET"])
 def get_logs():
     if not STATE["analytics_result"]:
         return jsonify({"error": "No active dataset analyzed."}), 404
@@ -389,6 +412,7 @@ def get_logs():
     })
 
 @app.route("/api/export/json", methods=["GET"])
+@app.route("/export/json", methods=["GET"])
 def export_json():
     if not STATE["analytics_result"]:
         return jsonify({"error": "No active dataset analyzed."}), 404
@@ -424,6 +448,7 @@ def export_json():
     )
 
 @app.route("/api/export/csv", methods=["GET"])
+@app.route("/export/csv", methods=["GET"])
 def export_csv():
     if not STATE["analytics_result"]:
         return jsonify({"error": "No active dataset analyzed."}), 404

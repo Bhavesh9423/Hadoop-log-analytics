@@ -46,7 +46,16 @@ export default function App() {
       const mode = config?.mode || 'local';
       const res = await api.loadSample(mode);
 
-      // Now fetch all detailed datasets
+      if (res?.analytics) {
+        setAnalytics(res.analytics);
+        setDatasetLoaded(true);
+        setActiveFile(res.filename || 'sample_access.log');
+        setActiveTab('dashboard');
+        loadSystemState();
+        return;
+      }
+
+      // Fallback: fetch individual datasets if analytics not bundled
       const [summary, statusCodes, urls, ips, methods, traffic, errors, pipeline] =
         await Promise.all([
           api.getSummary(),
@@ -92,6 +101,16 @@ export default function App() {
 
   const handleAnalysisComplete = async (analysisResult) => {
     try {
+      if (analysisResult?.analytics) {
+        setAnalytics(analysisResult.analytics);
+        setDatasetLoaded(true);
+        setActiveFile(analysisResult.filename || 'Uploaded Log');
+        setActiveTab('dashboard');
+        loadSystemState();
+        return;
+      }
+
+      // Fallback: fetch individual datasets if analytics not bundled
       const [summary, statusCodes, urls, ips, methods, traffic, errors, pipeline] =
         await Promise.all([
           api.getSummary(),
@@ -125,11 +144,12 @@ export default function App() {
 
       setAnalytics(fullAnalytics);
       setDatasetLoaded(true);
-      setActiveFile(analysisResult.filename);
+      setActiveFile(analysisResult.filename || 'Uploaded Log');
       setActiveTab('dashboard');
       loadSystemState();
     } catch (err) {
       console.error('Error fetching post-analysis details:', err);
+      alert(`Failed to load analysis details: ${err.message}`);
     }
   };
 

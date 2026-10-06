@@ -17,10 +17,16 @@
       }
     },
     {
-      "source": "/:path*",
+      "source": "/assets/:path*",
       "destination": {
         "service": "frontend",
-        "path": "/:path*"
+        "path": "/assets/:path*"
+      }
+    },
+    {
+      "source": "/(.*)",
+      "destination": {
+        "service": "frontend"
       }
     }
   ]

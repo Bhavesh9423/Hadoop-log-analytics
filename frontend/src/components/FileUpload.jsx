@@ -86,11 +86,11 @@ export function FileUpload({
       const res = await api.analyze(mode);
       clearInterval(stageInterval);
       setProcessingStage('Completed!');
-      setTimeout(() => {
-        setIsProcessing(false);
-        setProcessingStage('');
-        if (onAnalysisComplete) onAnalysisComplete(res);
-      }, 300);
+      if (onAnalysisComplete) {
+        await onAnalysisComplete(res);
+      }
+      setIsProcessing(false);
+      setProcessingStage('');
     } catch (err) {
       clearInterval(stageInterval);
       setIsProcessing(false);

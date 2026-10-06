@@ -3,29 +3,38 @@ import csv
 import io
 from datetime import datetime
 
+HTTP_METHODS = {"GET", "POST", "PUT", "DELETE", "HEAD", "OPTIONS", "PATCH", "CONNECT", "TRACE"}
+
 # Regex pattern matching standard Apache/Nginx format:
 # IP - - [Timestamp] "METHOD URL HTTP/Version" Status
 LOG_PATTERN = re.compile(
     r'^(\S+)\s+\S+\s+\S+\s+\[([^\]]+)\]\s+"(\S+)\s+(\S+)(?:\s+([^"]*))?"\s+(\d{3})'
 )
 
+# Relaxed pattern for logs without - -, optional quotes, or missing protocol
+RELAXED_LOG_PATTERN = re.compile(
+    r'^(\S+)\s+(?:.*?\[([^\]]+)\])?\s*"?([A-Z]{3,7})\s+([^\s"]+)(?:\s+([^"]*))?"?\s+(\d{3})'
+)
+
+formats = [
+    "%d/%b/%Y:%H:%M:%S",
+    "%Y-%m-%d %H:%M:%S",
+    "%Y-%m-%dT%H:%M:%S",
+    "%Y-%m-%d %H:%M",
+    "%d/%m/%Y %H:%M:%S",
+    "%Y/%m/%d %H:%M:%S",
+    "%Y-%m-%d"
+]
+
 def parse_flexible_timestamp(raw_ts: str):
     """
     Parses various timestamp representations (Apache format, ISO-8601, SQL datetime).
     Returns (datetime_obj, day_str, hour_str, iso_str)
     """
-    raw_ts = raw_ts.strip().strip("[]").strip('"').strip("'")
+    if not raw_ts:
+        return None, "Unknown", "Unknown", ""
+    raw_ts = raw_ts.strip().strip("[]").strip('\"\'')
     clean_ts = raw_ts.split()[0] if " " in raw_ts and "/" in raw_ts else raw_ts
-
-    formats = [
-        "%d/%b/%Y:%H:%M:%S",
-        "%Y-%m-%d %H:%M:%S",
-        "%Y-%m-%dT%H:%M:%S",
-        "%Y-%m-%d %H:%M",
-        "%d/%m/%Y %H:%M:%S",
-        "%Y/%m/%d %H:%M:%S",
-        "%Y-%m-%d"
-    ]
 
     for fmt in formats:
         try:
@@ -39,16 +48,27 @@ def parse_flexible_timestamp(raw_ts: str):
     return None, "Unknown", "Unknown", raw_ts
 
 def is_csv_header(row):
-    """Detects if row is a CSV header row like [ip, timestamp, method, url, status]"""
+    """Detects if row is a CSV header row like [ip, time, url, status] or [ip, timestamp, method, url, status]"""
     joined = " ".join([str(c).lower() for c in row])
-    header_keywords = ["ip", "timestamp", "datetime", "method", "url", "status", "path", "code"]
+    header_keywords = [
+        "ip", "timestamp", "datetime", "date", "time", "method", "url",
+        "status", "path", "code", "staus", "request", "req", "host"
+    ]
     match_count = sum(1 for kw in header_keywords if kw in joined)
-    return match_count >= 2
+    if match_count >= 2:
+        return True
+    last = str(row[-1]).strip().lower()
+    if last in ["status", "status_code", "staus", "code"]:
+        return True
+    return False
 
 def parse_log_line(line: str):
     """
     Parses a single log line into a structured dictionary.
-    Supports both standard Apache/Nginx combined access log lines AND comma-separated CSV log rows.
+    Supports:
+    1. Standard Apache/Nginx combined access log lines.
+    2. Relaxed server access log lines.
+    3. Comma-separated (CSV) and tab-separated (TSV) log rows (4-col, 5-col, 6-col).
     Returns None if line is malformed, header, or empty.
     """
     line = line.strip()
@@ -71,13 +91,31 @@ def parse_log_line(line: str):
             return None
 
         dt, day_str, hour_str, iso_str = parse_flexible_timestamp(raw_ts)
-
         return _build_record(ip, raw_ts, iso_str, dt, day_str, hour_str, method, url, http_version, status_code, line)
 
-    # 2. Try parsing as CSV row if line contains comma
-    if "," in line:
+    # 2. Try relaxed regex for non-standard / custom access logs
+    match_relaxed = RELAXED_LOG_PATTERN.match(line)
+    if match_relaxed:
+        ip = match_relaxed.group(1)
+        raw_ts = match_relaxed.group(2) or ""
+        method = match_relaxed.group(3).upper()
+        url = match_relaxed.group(4)
+        http_version = match_relaxed.group(5) if match_relaxed.group(5) else "HTTP/1.1"
+        status_str = match_relaxed.group(6)
+
         try:
-            reader = csv.reader(io.StringIO(line))
+            status_code = int(status_str)
+        except ValueError:
+            return None
+
+        dt, day_str, hour_str, iso_str = parse_flexible_timestamp(raw_ts)
+        return _build_record(ip, raw_ts, iso_str, dt, day_str, hour_str, method, url, http_version, status_code, line)
+
+    # 3. Try parsing as CSV / TSV row if line contains comma or tab
+    delimiter = "\t" if "\t" in line and "," not in line else ","
+    if delimiter in line:
+        try:
+            reader = csv.reader(io.StringIO(line), delimiter=delimiter)
             row = next(reader)
         except Exception:
             return None
@@ -85,26 +123,75 @@ def parse_log_line(line: str):
         if not row or is_csv_header(row):
             return None  # Header row or empty row
 
-        # Extract columns dynamically based on count
-        # Typical CSV: IP, Timestamp, Method, URL, Status (or Status Code)
-        if len(row) >= 5:
+        ip = None
+        raw_ts = ""
+        method = "GET"
+        url = "/"
+        http_version = "HTTP/1.1"
+        status_code = None
+
+        # Format 4 columns: IP, Time, URL/Request, Status (e.g., weblog.csv)
+        if len(row) == 4:
             ip = row[0].strip()
             raw_ts = row[1].strip()
-            method = row[2].strip().upper()
-            url = row[3].strip()
-            # If 6 columns, could be ip, timestamp, method, url, version, status
-            if len(row) >= 6 and (row[5].strip().isdigit()):
-                http_version = row[4].strip()
-                status_str = row[5].strip()
-            else:
-                http_version = "HTTP/1.1"
-                status_str = row[4].strip()
+            status_str = row[3].strip()
+            if not status_str.isdigit():
+                return None
+            status_code = int(status_str)
 
-            try:
-                status_code = int(status_str)
-            except ValueError:
+            req_parts = row[2].strip().split()
+            if req_parts and req_parts[0].upper() in HTTP_METHODS:
+                method = req_parts[0].upper()
+                url = req_parts[1] if len(req_parts) > 1 else "/"
+                http_version = req_parts[2] if len(req_parts) > 2 else "HTTP/1.1"
+            elif req_parts:
+                url = req_parts[0]
+
+        # Format 5 columns: IP, Timestamp, Method, URL, Status OR IP, Timestamp, URL, Status, Bytes
+        elif len(row) == 5:
+            ip = row[0].strip()
+            raw_ts = row[1].strip()
+            if row[4].strip().isdigit():
+                status_code = int(row[4].strip())
+                method = row[2].strip().upper() if row[2].strip().upper() in HTTP_METHODS else "GET"
+                url = row[3].strip()
+            elif row[3].strip().isdigit():
+                status_code = int(row[3].strip())
+                req_parts = row[2].strip().split()
+                if req_parts and req_parts[0].upper() in HTTP_METHODS:
+                    method = req_parts[0].upper()
+                    url = req_parts[1] if len(req_parts) > 1 else "/"
+                    http_version = req_parts[2] if len(req_parts) > 2 else "HTTP/1.1"
+                else:
+                    url = row[2].strip()
+            else:
                 return None
 
+        # Format 6+ columns: IP, Timestamp, Method, URL, [Version], Status, ...
+        elif len(row) >= 6:
+            ip = row[0].strip()
+            raw_ts = row[1].strip()
+            if row[5].strip().isdigit() and 100 <= int(row[5].strip()) <= 599:
+                status_code = int(row[5].strip())
+                method = row[2].strip().upper() if row[2].strip().upper() in HTTP_METHODS else "GET"
+                url = row[3].strip()
+                http_version = row[4].strip()
+            elif row[4].strip().isdigit() and 100 <= int(row[4].strip()) <= 599:
+                status_code = int(row[4].strip())
+                method = row[2].strip().upper() if row[2].strip().upper() in HTTP_METHODS else "GET"
+                url = row[3].strip()
+            else:
+                for col in reversed(row):
+                    c = col.strip()
+                    if c.isdigit() and 100 <= int(c) <= 599:
+                        status_code = int(c)
+                        break
+                if status_code is None:
+                    return None
+                method = row[2].strip().upper() if row[2].strip().upper() in HTTP_METHODS else "GET"
+                url = row[3].strip()
+
+        if ip and status_code is not None:
             dt, day_str, hour_str, iso_str = parse_flexible_timestamp(raw_ts)
             return _build_record(ip, raw_ts, iso_str, dt, day_str, hour_str, method, url, http_version, status_code, line)
 

@@ -214,14 +214,14 @@ def run_analysis_pipeline(filepath: str, requested_mode: str):
             engine = HadoopMapReduceEngine()
             try:
                 result = engine.execute(filepath)
-            except HadoopUnavailableError as hue:
-                logger.warning(f"Hadoop unavailable: {hue}. Falling back to Local Demo Mode.")
+            except Exception as hue:
+                logger.warning(f"Hadoop execution unavailable: {hue}. Falling back to Local Demo Mode.")
                 local_engine = LocalMapReduceEngine()
                 result = local_engine.execute(filepath)
                 result["fallback_notice"] = {
                     "occurred": True,
                     "reason": str(hue),
-                    "message": "Hadoop cluster was not detected. Automatically executed using Local Demo Mode."
+                    "message": "Hadoop cluster was not detected or failed. Automatically executed using Local Demo Mode."
                 }
         else:
             local_engine = LocalMapReduceEngine()
@@ -232,6 +232,23 @@ def run_analysis_pipeline(filepath: str, requested_mode: str):
         STATE["is_analyzing"] = False
         save_state()
 
+        # Build full structured analytics object
+        full_analytics = {
+            "summary": result["summary"],
+            "status_codes": result["status_codes"],
+            "status_categories": result["status_categories"],
+            "urls": result["urls"][:20],
+            "ips": result["ips"][:20],
+            "methods": result["methods"],
+            "traffic": result["traffic"],
+            "errors": result["errors"],
+            "pipeline_stages": result["pipeline_stages"],
+            "processing_mode": result["processing_mode"],
+            "processing_mode_label": result["processing_mode_label"],
+            "execution_time_ms": result["execution_time_ms"],
+            "fallback_notice": result.get("fallback_notice")
+        }
+
         # Return comprehensive initial response
         response_data = {
             "success": True,
@@ -241,7 +258,8 @@ def run_analysis_pipeline(filepath: str, requested_mode: str):
             "execution_time_ms": result["execution_time_ms"],
             "pipeline_stages": result["pipeline_stages"],
             "summary": result["summary"],
-            "fallback_notice": result.get("fallback_notice")
+            "fallback_notice": result.get("fallback_notice"),
+            "analytics": full_analytics
         }
         return jsonify(response_data)
 

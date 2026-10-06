@@ -54,9 +54,23 @@ def emit(key, value=1):
     """Emit intermediate key-value pair to stdout for Shuffle & Sort"""
     sys.stdout.write(f"{key}\t{value}\n")
 
+HTTP_METHODS = {"GET", "POST", "PUT", "DELETE", "HEAD", "OPTIONS", "PATCH", "CONNECT", "TRACE"}
+
+RELAXED_LOG_PATTERN = re.compile(
+    r'^(\S+)\s+(?:.*?\[([^\]]+)\])?\s*"?([A-Z]{3,7})\s+([^\s"]+)(?:\s+([^"]*))?"?\s+(\d{3})'
+)
+
 def is_header(row):
     joined = " ".join([str(c).lower() for c in row])
-    return any(kw in joined for kw in ["timestamp", "datetime", "method", "status_code"]) and any(kw in joined for kw in ["ip", "url", "path"])
+    header_keywords = [
+        "ip", "timestamp", "datetime", "date", "time", "method", "url",
+        "status", "path", "code", "staus", "request", "req", "host"
+    ]
+    match_count = sum(1 for kw in header_keywords if kw in joined)
+    if match_count >= 2:
+        return True
+    last = str(row[-1]).strip().lower()
+    return last in ["status", "status_code", "staus", "code"]
 
 def main():
     for line in sys.stdin:
@@ -66,8 +80,8 @@ def main():
 
         ip = None
         ts_str = None
-        method = None
-        url = None
+        method = "GET"
+        url = "/"
         status_code = None
 
         match = LOG_PATTERN.match(line)
@@ -77,20 +91,61 @@ def main():
             method = match.group(3).upper()
             url = match.group(4)
             status_code = match.group(6)
-        elif "," in line:
-            try:
-                reader = csv.reader(io.StringIO(line))
-                row = next(reader)
-                if not row or is_header(row):
-                    continue
-                if len(row) >= 5:
-                    ip = row[0].strip()
-                    ts_str = row[1].strip()
-                    method = row[2].strip().upper()
-                    url = row[3].strip()
-                    status_code = row[5].strip() if len(row) >= 6 and row[5].strip().isdigit() else row[4].strip()
-            except Exception:
-                pass
+        else:
+            match_relaxed = RELAXED_LOG_PATTERN.match(line)
+            if match_relaxed:
+                ip = match_relaxed.group(1)
+                ts_str = match_relaxed.group(2) or ""
+                method = match_relaxed.group(3).upper()
+                url = match_relaxed.group(4)
+                status_code = match_relaxed.group(6)
+            elif "," in line or "\t" in line:
+                try:
+                    delimiter = "\t" if "\t" in line and "," not in line else ","
+                    reader = csv.reader(io.StringIO(line), delimiter=delimiter)
+                    row = next(reader)
+                    if not row or is_header(row):
+                        continue
+
+                    if len(row) == 4:
+                        ip = row[0].strip()
+                        ts_str = row[1].strip()
+                        if row[3].strip().isdigit():
+                            status_code = row[3].strip()
+                            req_parts = row[2].strip().split()
+                            if req_parts and req_parts[0].upper() in HTTP_METHODS:
+                                method = req_parts[0].upper()
+                                url = req_parts[1] if len(req_parts) > 1 else "/"
+                            elif req_parts:
+                                url = req_parts[0]
+                    elif len(row) == 5:
+                        ip = row[0].strip()
+                        ts_str = row[1].strip()
+                        if row[4].strip().isdigit():
+                            status_code = row[4].strip()
+                            method = row[2].strip().upper() if row[2].strip().upper() in HTTP_METHODS else "GET"
+                            url = row[3].strip()
+                        elif row[3].strip().isdigit():
+                            status_code = row[3].strip()
+                            req_parts = row[2].strip().split()
+                            if req_parts and req_parts[0].upper() in HTTP_METHODS:
+                                method = req_parts[0].upper()
+                                url = req_parts[1] if len(req_parts) > 1 else "/"
+                            else:
+                                url = row[2].strip()
+                    elif len(row) >= 6:
+                        ip = row[0].strip()
+                        ts_str = row[1].strip()
+                        if row[5].strip().isdigit() and 100 <= int(row[5].strip()) <= 599:
+                            status_code = row[5].strip()
+                            method = row[2].strip().upper() if row[2].strip().upper() in HTTP_METHODS else "GET"
+                            url = row[3].strip()
+                        elif row[4].strip().isdigit() and 100 <= int(row[4].strip()) <= 599:
+                            status_code = row[4].strip()
+                            method = row[2].strip().upper() if row[2].strip().upper() in HTTP_METHODS else "GET"
+                            url = row[3].strip()
+                except Exception:
+                    pass
 
         if not ip or not status_code:
             # Handle malformed log record gracefully

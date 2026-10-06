@@ -54,6 +54,18 @@ export function DashboardView({
         </div>
       )}
 
+      {/* Zero Valid Records Warning */}
+      {summary?.total_requests === 0 && (
+        <div className="p-4 rounded-xl bg-rose-950/40 border border-rose-800 text-rose-200 text-xs space-y-1">
+          <strong className="text-white font-semibold flex items-center gap-1.5">
+            ⚠️ No valid log records could be parsed ({summary.malformed_lines?.toLocaleString() || 0} malformed lines detected)
+          </strong>
+          <p className="text-rose-300">
+            Please ensure your uploaded file contains Apache/Nginx web server access logs (.log, .txt) or a CSV (.csv) with IP addresses, timestamps, request endpoints, and HTTP status codes.
+          </p>
+        </div>
+      )}
+
       {/* KPI Cards */}
       <KPICards
         summary={summary}
